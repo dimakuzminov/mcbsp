@@ -123,6 +123,7 @@ static int mcbsp_netif_start_xmit(struct sk_buff *skb, struct net_device *net)
 
 static void mcbsp_netif_timeout(struct net_device *net)
 {
+	PDEBUG("mcbsp_netif_timeout");
 	net->trans_start = jiffies;
     PDEBUG("\n");
 }

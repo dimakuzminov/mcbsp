@@ -654,6 +654,9 @@ typedef struct mcbspConfigStructFull
     int fPer;
     int sclkMe;
     int clkSm;
+    int rdmaen;
+    int xdmaen;
+
 }MCBSP_INIT_CONFIG_FULL;
 
 

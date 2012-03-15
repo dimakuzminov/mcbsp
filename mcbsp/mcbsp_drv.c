@@ -37,9 +37,21 @@
 #include "mcbsp_core.h"
 #include "mcbsp_netif.h"
 
+#ifdef MCBSP_DMA
+#include <linux/netdevice.h>
+#include <plat/dma.h>
+#include <plat/mcbsp.h>
+#endif
+
+static int mcbsp_dma_setup(void);
+static void mcbsp_read_dma(struct mcbsp_dev *dev, int len);
 
 struct mcbsp_driver mcbsp_drv;
 const u32 mcbsp_preamble[] = {0xfffefdfc, 0xfbfaf9f8};
+#ifdef MCBSP_DMA
+struct completion rx_dma_completion;
+struct completion tx_dma_completion;
+#endif
 
 #define MCBSP_DRV_DRIVER_NAME "mcbsp-netif"
 #define MCBSP_DRV_MAJOR 205
@@ -337,6 +349,10 @@ int mcbsp_drv_configure(MCBSP_INIT_CONFIG_FULL* mcbspStruct)
     val = OMAP_MCBSP1_REGISTER_READ(MCBSPLP_RCCR_REG);
     val = val&(~RCCR_RFULL_CYCLE);
     val = val|(mcbspStruct->rFullCycle << RCCR_RFULL_CYCLE_BIT);
+#ifdef MCBSP_DMA
+    val = val&(~RCCR_RDMAEN);
+    val = val|(mcbspStruct->rdmaen << RCCR_RDMAEN_BIT);
+#endif
     OMAP_MCBSP1_REGISTER_WRITE(MCBSPLP_RCCR_REG, val); 
 
     /* config Tx mode */
@@ -350,6 +366,10 @@ int mcbsp_drv_configure(MCBSP_INIT_CONFIG_FULL* mcbspStruct)
 
     val = OMAP_MCBSP1_REGISTER_READ(MCBSPLP_XCCR_REG);
     val = val&(~RCCR_RFULL_CYCLE)&(~XCCR_EXTCLKGATE);
+#ifdef MCBSP_DMA
+    val = val&(~XCCR_XDMAEN);
+    val = val|(mcbspStruct->xdmaen << XCCR_XDMAEN_BIT);
+#endif
     OMAP_MCBSP1_REGISTER_WRITE(MCBSPLP_XCCR_REG, val
             |(mcbspStruct->xFullCycle << RCCR_RFULL_CYCLE_BIT)
             |(mcbspStruct->extClkGate << XCCR_EXTCLKGATE_BIT));
@@ -411,10 +431,10 @@ int mcbsp_drv_configure(MCBSP_INIT_CONFIG_FULL* mcbspStruct)
     return MCBSP_DRV_OK;
 }
 
+#ifdef MCBSP_RX_INTERRUPT
 int mcbsp_drv_readl(int* readBuffer)
 {
     int val;
-
 #ifdef SUPPORT_SPCR1_RSYNC_ERROR
     val = OMAP_MCBSP1_REGISTER_READ(MCBSPLP_SPCR1_REG);
     if (val & SPCR1_RSYNCERR) {
@@ -423,7 +443,6 @@ int mcbsp_drv_readl(int* readBuffer)
         PERROR("SPCR1_RSYNCERROR\n");
     }
 #endif
-
     val = 0;
     while (!(OMAP_MCBSP1_REGISTER_READ(MCBSPLP_SPCR1_REG)&SPCR1_RRDY)) {
         if (val++ > MCBSP_ACCESS_RETRY) {
@@ -434,13 +453,14 @@ int mcbsp_drv_readl(int* readBuffer)
             PDEBUG("MCBSP READ FAILED\n");
             return -2;
         }
-        msleep(MCBSP_ACCESS_DELAY);
     }
 
     *readBuffer = OMAP_MCBSP1_REGISTER_READ(MCBSPLP_DRR_REG);
     return MCBSP_DRV_OK;
 }
+#endif
 
+#ifdef MCBSP_TX_INTERRUPT
 int mcbsp_drv_writel(int* writeBuffer)
 {
     int val;
@@ -459,13 +479,13 @@ int mcbsp_drv_writel(int* writeBuffer)
             val = OMAP_MCBSP1_REGISTER_READ(MCBSPLP_SPCR2_REG);
             OMAP_MCBSP1_REGISTER_WRITE(MCBSPLP_SPCR2_REG, val&(~SPCR2_XRST));
             OMAP_MCBSP1_REGISTER_WRITE(MCBSPLP_SPCR2_REG, val|SPCR2_XRST);
-            PDEBUG("MCBSP WRITE FAILED\n");
+            PERROR("MCBSP WRITE FAILED\n");
             return MCBSP_DRV_ERROR;
         }
-        msleep(MCBSP_ACCESS_DELAY);
     }
     return MCBSP_DRV_OK;
 }
+#endif
 
 #ifdef DEBUG_LOOP_TEST
 static void mcbsp_drv_self_test(void)
@@ -480,6 +500,7 @@ static void mcbsp_drv_self_test(void)
 }
 #endif
 
+#ifdef MCBSP_RX_INTERRUPT
 static irqreturn_t mcbsp_drv_rx_irq_handler(int irq, void *dev_id)
 {
     struct mcbsp_driver *drv = (struct mcbsp_driver*) dev_id;
@@ -500,6 +521,7 @@ static void mcbsp_drv_free_interrupt(void)
 {
     free_irq(MCBSP_DRV_RX_IRQ, &mcbsp_drv);
 }
+#endif
 
 void mcbsp_drv_tx_threshold(int threshold_value )
 {
@@ -515,10 +537,12 @@ static void mcbsp_drv_set_interrupt(void)
 {
 	MCBSP_INTERRUPTS_ENABLE mcbspIntrEnable;
 	int val;
+
 #ifdef SUPPORT_SPCR1_RSYNC_ERROR
 	mcbsp_drv_tx_threshold(0x10);
 	mcbsp_drv_rx_threshold(0x10);
 #endif
+
 	mcbspIntrEnable.x_empty_eof_en = MCBSP_INTR_OFF;  
 	mcbspIntrEnable.x_ovfl_en      = MCBSP_INTR_OFF;
 	mcbspIntrEnable.x_undfl_en     = MCBSP_INTR_OFF;
@@ -553,6 +577,7 @@ static void mcbsp_drv_set_interrupt(void)
         | ((mcbspIntrEnable.r_sync_err_en) 	 << IRQENABLE_RSYNCERREN_BIT ) 
         ;  
         
+#ifdef MCBSP_RX_INTERRUPT
     OMAP_MCBSP1_REGISTER_WRITE(MCBSPLP_IRQENABLE_REG, val); 
     val = request_irq(MCBSP_DRV_RX_IRQ, mcbsp_drv_rx_irq_handler, 0, "McBSP", &mcbsp_drv);
     if (val != 0) {
@@ -561,6 +586,7 @@ static void mcbsp_drv_set_interrupt(void)
     } else {
         PDEBUG(" IRQ handling established\n");
     }
+#endif
 }
 
 static void mcbsp_drv_setup(void)
@@ -609,13 +635,211 @@ static void mcbsp_drv_setup(void)
     mcbspStruct.sclkMe      = 0; 
     mcbspStruct.clkSm       = 0;
 
+#ifdef MCBSP_DMA
+    mcbspStruct.rdmaen      = 1;
+    mcbspStruct.xdmaen      = 1;
+#endif
     mcbsp_drv_configure(&mcbspStruct);
     mcbsp_drv_set_interrupt();
-    mcbsp_drv_digitial_loopback(FALSE);    
+    mcbsp_drv_digitial_loopback(FALSE);
+#if (defined(MCBSP_DMA) && !defined(MCBSP_RX_INTERRUPT))
+    mcbsp_dma_setup();
+#endif
     mcbsp_drv_analog_loopback(FALSE); 
     mcbsp_drv_release_reset(); 
 }
 
+#ifdef MCBSP_DMA
+void mcbsp_stop_rx(struct mcbsp_dev *dev)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&dev->rx_msg_list_lock, flags);
+	dev->rx_stop = 1;
+	spin_unlock_irqrestore(&dev->rx_msg_list_lock, flags);
+	complete(&rx_dma_completion);
+}
+
+int mcbsp_is_rx_stop(struct mcbsp_dev *dev)
+{
+	int rx_stop = 0;
+	unsigned long flags;
+	spin_lock_irqsave(&dev->rx_msg_list_lock, flags);
+	rx_stop = dev->rx_stop; //TODO - add initalizer
+	spin_unlock_irqrestore(&dev->rx_msg_list_lock, flags);
+	return rx_stop;
+}
+
+void mcbsp_rx_work_dma_handler(struct work_struct *work)
+{
+	int len;
+	struct mcbsp_dev *dev = container_of(work, struct mcbsp_dev, rx_work_dma);
+
+	while (!mcbsp_is_rx_stop(dev))
+	{
+		if (dev->read_parse_status == MCBSP_PACKAGE_READING_DATA && dev->read_parse_length != -1)
+			len = dev->read_parse_length;
+		else
+			len = 1;
+
+		init_completion(&rx_dma_completion);
+		mcbsp_read_dma(dev, len);
+		wait_for_completion(&rx_dma_completion);
+
+		dev->driver->parse_read((u32*)dev->mcbsp_bufdst, dev);
+	}
+
+	PDEBUG_DMA("exit mcbsp_rx_work_dma_handler\n");
+}
+
+static void mcbsp_rx_dma_callback(int lch, u16 ch_status, void *data)
+{
+	complete(&rx_dma_completion);
+}
+
+static void mcbsp_release_dma(void)
+{
+	struct mcbsp_dev *mcbsp = mcbsp_drv.dev;
+
+	omap_free_dma(mcbsp->dma_rx_lch);
+	mcbsp->dma_rx_lch = -1;
+
+	omap_free_dma(mcbsp->dma_tx_lch);
+	mcbsp->dma_tx_lch = -1;
+}
+
+static void mcbsp_read_dma(struct mcbsp_dev *mcbsp, int len)
+{
+	omap_set_dma_transfer_params(mcbsp->dma_rx_lch,
+					OMAP_DMA_DATA_TYPE_S32,
+					len == 1 ? 1 : len >> 1 , 1,
+					OMAP_DMA_SYNC_ELEMENT,
+					mcbsp->dma_rx_sync, 0);
+
+	omap_set_dma_src_params(mcbsp->dma_rx_lch,
+				0,
+				OMAP_DMA_AMODE_CONSTANT,
+				OMAP_MCBSP_1_BASE + OMAP_MCBSP_REG_DRR,
+				0, 0);
+
+
+	omap_set_dma_dest_params(mcbsp->dma_rx_lch,
+					0,
+					OMAP_DMA_AMODE_POST_INC ,
+					mcbsp->mcbsp_physdst,
+					0, 0);
+
+	omap_start_dma(mcbsp->dma_rx_lch);
+}
+
+static void mcbsp_tx_dma_callback(int lch, u16 ch_status, void *data)
+{
+	complete(&tx_dma_completion);
+}
+
+static int mcbsp_dma_setup(void)
+{
+	struct mcbsp_dev *mcbsp = mcbsp_drv.dev;
+	int dma_rx_ch;
+	int dma_tx_ch;
+
+	mcbsp->dma_rx_sync = OMAP24XX_DMA_MCBSP1_RX;
+	mcbsp->dma_tx_sync = OMAP24XX_DMA_MCBSP1_TX;
+
+	/* Allocation for TX */
+	mcbsp->mcbsp_bufsrc = dma_alloc_coherent(NULL, MCBSP_DMA_BUFF_SIZE, &(mcbsp->mcbsp_physsrc), 0);
+	if (!mcbsp->mcbsp_bufsrc) {
+		PERROR ("dma_alloc_coherent failed for physsrc\n");
+		return -ENOMEM;
+	}
+
+	/* Allocation for RX */
+	mcbsp->mcbsp_bufdst = dma_alloc_coherent(NULL, MCBSP_DMA_BUFF_SIZE, &(mcbsp->mcbsp_physdst), 0);
+	if (! mcbsp->mcbsp_bufdst) {
+		PERROR ("dma_alloc_coherent failed for physsrc\n");
+		return -ENOMEM;
+	}
+
+	if (omap_request_dma(mcbsp->dma_rx_sync, "McBSP RX",
+				mcbsp_rx_dma_callback,
+				mcbsp,
+				&dma_rx_ch)) {
+		PERROR("Unable to request DMA channel for RX");
+		return -EAGAIN;
+	}
+
+	mcbsp->dma_rx_lch = dma_rx_ch;
+
+	if (omap_request_dma(mcbsp->dma_tx_sync, "McBSP TX",
+				mcbsp_tx_dma_callback,
+				mcbsp,
+				&dma_tx_ch)) {
+
+		PERROR("Unable to request DMA channel for TX\n");
+		return -EAGAIN;
+	}
+
+	mcbsp->dma_tx_lch = dma_tx_ch;
+
+	PDEBUG_DMA("mcbsp->dma_rx_lch=%d\n", mcbsp->dma_rx_lch);
+	PDEBUG_DMA("mcbsp->dma_tx_lch=%d\n", mcbsp->dma_tx_lch);
+
+	queue_work(mcbsp->rx_work_queue_dma_ptr, &mcbsp->rx_work_dma);
+
+	return 0;
+}
+
+static int mcbsp_drv_write_data(const char *buf, int count, struct mcbsp_dev *dev)
+{
+	const char *src_pos = buf;
+
+	memcpy((char*) (dev->mcbsp_bufsrc), (int*)&mcbsp_preamble[0] , 4);
+	memcpy((char*) (dev->mcbsp_bufsrc+ 4), (int*)&mcbsp_preamble[1] , 4);
+	memcpy((char*) (dev->mcbsp_bufsrc+ 8), &count , 4);
+	memcpy((char*) (dev->mcbsp_bufsrc+ 12), &count , 4);
+	memcpy((char*) (dev->mcbsp_bufsrc+ 16), src_pos, count);
+
+	dev->bufsrc_len = count + 16;
+
+	netif_stop_queue(dev->net);
+	queue_work(dev->tx_work_queue_dma_ptr, &dev->tx_work_dma);
+	return 0;
+}
+
+void mcbsp_tx_work_dma_handler(struct work_struct *work)
+{
+	struct mcbsp_dev *dev = container_of(work, struct mcbsp_dev, tx_work_dma);
+	int length = 0;
+	int src_port = 0;
+	int dest_port = 0;
+
+	length = dev->bufsrc_len;
+
+	init_completion(&tx_dma_completion);
+	omap_set_dma_transfer_params(dev->dma_tx_lch,
+					 OMAP_DMA_DATA_TYPE_S32,
+					 length >> 1, 1,
+					 OMAP_DMA_SYNC_ELEMENT,
+					 dev->dma_tx_sync, 0);
+
+	omap_set_dma_dest_params(dev->dma_tx_lch,
+				 src_port,
+				 OMAP_DMA_AMODE_CONSTANT,
+				 OMAP_MCBSP_1_BASE + OMAP_MCBSP_REG_DXR,
+				 0, 0);
+
+	omap_set_dma_src_params(dev->dma_tx_lch,
+				dest_port,
+				OMAP_DMA_AMODE_POST_INC,
+				dev->mcbsp_physsrc,
+				0, 0);
+
+	omap_start_dma(dev->dma_tx_lch);
+	wait_for_completion(&tx_dma_completion);
+	netif_wake_queue(dev->net);
+	PDEBUG_DMA("WRITTEN %d BYTES\n", length);
+}
+
+#else
 static int mcbsp_drv_write_data(const char *buf, int count, struct mcbsp_dev *dev)
 {
     int length = 0;
@@ -657,25 +881,34 @@ static int mcbsp_drv_write_data(const char *buf, int count, struct mcbsp_dev *de
     PDEBUG("WRITTEN %d BYTES\n", count);
     return length;
 }
+#endif
 
 static void mcbsp_drv_parse_read_data(u32 *data, struct mcbsp_dev *dev)
 {
     switch(dev->read_parse_status) {
         case MCBSP_PACKAGE_WAIT_PREAMBLE_0:
-            if (data[0] == mcbsp_preamble[0])
+            if (data[0] == mcbsp_preamble[0]){
                 dev->read_parse_status = MCBSP_PACKAGE_WAIT_PREAMBLE_1;
+                PDEBUG_DMA("MCBSP_PACKAGE_WAIT_PREAMBLE_0\n");
+            }
             break;
         case MCBSP_PACKAGE_WAIT_PREAMBLE_1:
-            if (data[0] == mcbsp_preamble[1])
+            if (data[0] == mcbsp_preamble[1]){
+            	PDEBUG_DMA("MCBSP_PACKAGE_WAIT_PREAMBLE_1\n");
                 dev->read_parse_status = MCBSP_PACKAGE_WAIT_LENGTH_0;
-            else
+            }
+            else{
+            	PDEBUG_DMA("return -> MCBSP_PACKAGE_WAIT_PREAMBLE_0\n");
                 dev->read_parse_status = MCBSP_PACKAGE_WAIT_PREAMBLE_0;
+            }
             break;
         case MCBSP_PACKAGE_WAIT_LENGTH_0:
+        	PDEBUG_DMA("MCBSP_PACKAGE_WAIT_LENGTH_0\n");
             dev->read_parse_length = data[0];
             dev->read_parse_status = MCBSP_PACKAGE_WAIT_LENGTH_1;
             break;
         case MCBSP_PACKAGE_WAIT_LENGTH_1:
+        	PDEBUG_DMA("MCBSP_PACKAGE_WAIT_LENGTH_1\n");
             if (dev->read_parse_length != data[0]) {
                 dev->read_parse_status = MCBSP_PACKAGE_WAIT_PREAMBLE_0;
             } else {
@@ -687,14 +920,22 @@ static void mcbsp_drv_parse_read_data(u32 *data, struct mcbsp_dev *dev)
                     dev->read_parse_status = MCBSP_PACKAGE_WAIT_PREAMBLE_0;
                 } else {
                     dev->skb_reading->len = dev->read_parse_length;
+                    PDEBUG_DMA("skb_reading->len=%d, aligned_size=%d\n",dev->read_parse_length, aligned_size);
                     dev->rx_data = skb_put(dev->skb_reading, aligned_size);
                 }
             }
             break;
         case MCBSP_PACKAGE_READING_DATA:
-            memcpy(dev->rx_data+dev->read_parse_count, (char*) data, 4);
-            dev->read_parse_count = dev->read_parse_count+4;
-            if (dev->read_parse_count >= dev->read_parse_length) {
+#ifdef MCBSP_DMA
+        	PDEBUG_DMA("MCBSP_PACKAGE_READING_DATA\n");
+        	PDEBUG_DMA("read_parse_length=%d\n", dev->read_parse_length);
+			memcpy(dev->rx_data, (char*) data, dev->read_parse_length);
+#else
+        	memcpy(dev->rx_data+dev->read_parse_count, (char*) data, 4);
+			dev->read_parse_count = dev->read_parse_count+4;
+			if (dev->read_parse_count >= dev->read_parse_length)
+#endif
+            {
                 unsigned long flags;
                 struct mcbsp_msg *msg;
 
@@ -710,6 +951,7 @@ static void mcbsp_drv_parse_read_data(u32 *data, struct mcbsp_dev *dev)
                 dev->read_parse_status = MCBSP_PACKAGE_WAIT_PREAMBLE_0;
                 dev->skb_reading = NULL;
                 PDEBUG("ENTIRE PACKAGE RECEIVED \n");
+                dev->read_parse_length = -1; //TODO - add initializer
             }
             break;
     }
@@ -769,6 +1011,14 @@ static int mcbsp_drv_register_driver(struct mcbsp_driver *drv)
 	INIT_LIST_HEAD(&dev->msg_list);
     dev->rx_work_queue_ptr = create_workqueue("rx_mcbsp_queue");
     INIT_WORK(&dev->rx_work, drv->read_callback);
+
+#ifdef MCBSP_DMA
+    dev->rx_work_queue_dma_ptr = create_workqueue("rx_mcbsp_queue_dma");
+    dev->tx_work_queue_dma_ptr = create_workqueue("tx_mcbsp_queue_dma");
+    INIT_WORK(&dev->rx_work_dma, mcbsp_rx_work_dma_handler);
+    INIT_WORK(&dev->tx_work_dma, mcbsp_tx_work_dma_handler);
+#endif
+
     PDEBUG("DRIVER IS REGISTERED\n");
     return 0;
 }
@@ -776,7 +1026,13 @@ static int mcbsp_drv_register_driver(struct mcbsp_driver *drv)
 static void mcbsp_drv_unregister_driver(struct mcbsp_driver *drv)
 {
     struct mcbsp_dev *dev = drv->dev;
+
     destroy_workqueue(dev->rx_work_queue_ptr);
+#ifdef MCBSP_DMA
+    mcbsp_stop_rx(dev);
+    destroy_workqueue(dev->rx_work_queue_dma_ptr);
+    destroy_workqueue(dev->tx_work_queue_dma_ptr);
+#endif
     PDEBUG("DRIVER IS UNREGISTERED\n");
 }
 
@@ -801,7 +1057,11 @@ static int __init mcbsp_drv_init(void)
 
 static void __exit mcbsp_drv_exit(void)
 {
+#ifdef MCBSP_RX_INTERRUPT
     mcbsp_drv_free_interrupt();
+#else
+    mcbsp_release_dma();
+#endif
     mcbsp_drv_iounmap();
     mcbsp_netif_remove_netdev(mcbsp_drv.dev);
     mcbsp_drv_unregister_driver(&mcbsp_drv);
@@ -814,4 +1074,3 @@ module_exit(mcbsp_drv_exit);
 MODULE_DESCRIPTION("OMAP MCBSP NETIF DRIVER");
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Galilsoft");
-
