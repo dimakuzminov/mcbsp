@@ -47,6 +47,8 @@
 #define MCBSP_DMA_BUFF_SIZE (2 * 1024)
 #endif
 
+void mcbsp_netif_dump_hex(const char *label, char * buf, int len);
+
 struct mcbsp_driver;
 
 struct mcbsp_msg {

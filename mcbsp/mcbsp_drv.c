@@ -594,8 +594,8 @@ static void mcbsp_drv_setup(void)
     MCBSP_INIT_CONFIG_FULL mcbspStruct;
     mcbspStruct.port = MCBSP1;
 
-    mcbspStruct.fsrm        = SYNC_EXTERNAL; 
-    mcbspStruct.clkrm       = CLK_EXTERNAL; 
+    mcbspStruct.fsrm        = SYNC_EXTERNAL;
+    mcbspStruct.clkrm       = CLK_EXTERNAL;
     mcbspStruct.fsrp        = SYNC_ACTIVE_HIGH;
     mcbspStruct.clkrp       = CLKR_SAMPLE_FALL;
     mcbspStruct.rFullCycle  = FULL_CYCLE;
@@ -629,7 +629,7 @@ static void mcbsp_drv_setup(void)
 
     mcbspStruct.gSync       = SRG_FREE;
     mcbspStruct.clkSp       = CLKS_RISE;
-    mcbspStruct.fPer        = 300;
+    mcbspStruct.fPer        = 280;
     mcbspStruct.fsgm        = 0;
 
     mcbspStruct.sclkMe      = 0; 
@@ -679,7 +679,7 @@ void mcbsp_rx_work_dma_handler(struct work_struct *work)
 		if (dev->read_parse_status == MCBSP_PACKAGE_READING_DATA && dev->read_parse_length != -1)
 			len = dev->read_parse_length;
 		else
-			len = 1;
+			len = 4;
 
 		init_completion(&rx_dma_completion);
 		mcbsp_read_dma(dev, len);
@@ -709,9 +709,11 @@ static void mcbsp_release_dma(void)
 
 static void mcbsp_read_dma(struct mcbsp_dev *mcbsp, int len)
 {
+	len = (len+((4-(len%4))%4))>>2;
 	omap_set_dma_transfer_params(mcbsp->dma_rx_lch,
 					OMAP_DMA_DATA_TYPE_S32,
-					len == 1 ? 1 : len >> 1 , 1,
+					len,
+					1,
 					OMAP_DMA_SYNC_ELEMENT,
 					mcbsp->dma_rx_sync, 0);
 
@@ -814,10 +816,13 @@ void mcbsp_tx_work_dma_handler(struct work_struct *work)
 
 	length = dev->bufsrc_len;
 
+	length = (length+((4-(length%4))%4))>>2;
+
 	init_completion(&tx_dma_completion);
 	omap_set_dma_transfer_params(dev->dma_tx_lch,
 					 OMAP_DMA_DATA_TYPE_S32,
-					 length >> 1, 1,
+					 length,
+					 1,
 					 OMAP_DMA_SYNC_ELEMENT,
 					 dev->dma_tx_sync, 0);
 
